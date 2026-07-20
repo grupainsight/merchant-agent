@@ -84,12 +84,18 @@ def synthesize_recommendations(
         client = anthropic.Anthropic(api_key=config.anthropic_api_key)
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=2000,
+            max_tokens=4000,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_message}],
         )
 
         raw_text = response.content[0].text.strip()
+
+        # Strip markdown fences if present
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("\n", 1)[1] if "\n" in raw_text else raw_text[3:]
+        if raw_text.endswith("```"):
+            raw_text = raw_text[:-3].strip()
 
         # Track token usage
         input_tokens = response.usage.input_tokens
