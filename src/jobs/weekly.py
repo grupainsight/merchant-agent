@@ -77,7 +77,9 @@ def run_weekly():
             logger.info(f"Snapshot diff: {diff.summary} (significant: {diff.has_significant_change})")
 
             # Step 5: Save to Supabase
+            logger.info(f"Saving {len(health.products)} product statuses...")
             save_product_status(health.products)
+            logger.info(f"Saving {len(issues.issues)} account issues...")
             save_account_issues(issues.issues)
 
             today = date.today().isoformat()

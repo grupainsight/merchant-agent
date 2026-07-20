@@ -119,11 +119,17 @@ def add_recommendation_event(event: dict) -> None:
 # Merchant-specific
 # ============================================================
 
-def save_product_status(records: list[dict]) -> None:
-    """Save product status snapshot."""
+def save_product_status(records: list[dict], batch_size: int = 200) -> None:
+    """Save product status snapshot in batches."""
     db = get_client()
-    if records:
-        db.table("merchant_product_status").insert(records).execute()
+    if not records:
+        return
+    import logging
+    logger = logging.getLogger(__name__)
+    for i in range(0, len(records), batch_size):
+        batch = records[i:i + batch_size]
+        db.table("merchant_product_status").insert(batch).execute()
+        logger.info(f"Saved product status batch {i // batch_size + 1} ({len(batch)} records)")
 
 
 def save_merchant_metrics(metrics: dict) -> None:
