@@ -1,19 +1,31 @@
 """
 Merchant Agent - Weekly job.
 Railway cron entrypoint: python -m src.jobs.weekly
-Runs the full pipeline: collect -> normalize -> snapshot compare -> LLM synthesis if needed.
+Runs the full pipeline: collect -> normalize -> snapshot compare -> save.
+LLM synthesis deferred to next phase.
 Process MUST exit after completion (Railway cron requirement).
 """
 
+import json
 import logging
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from src.clients import CLIENTS
 from src.config import config
+from src.collectors.product_health import collect_product_health
+from src.collectors.account_issues import collect_account_issues
+from src.collectors.performance import collect_performance
+from src.snapshot import compare_snapshots
 from src.db import (
     create_run,
     complete_run,
+    save_product_status,
+    save_merchant_metrics,
+    save_account_issues,
+    save_merchant_report,
+    upsert_dashboard_module,
+    get_previous_snapshot,
 )
 
 logging.basicConfig(
@@ -34,29 +46,135 @@ def run_weekly():
     for client in CLIENTS:
         run_record = None
         try:
-            # Create run record
             run_record = create_run(
                 client_id=client.client_id,
                 job_type="weekly",
                 scheduled_for=datetime.now(UTC).isoformat(),
             )
             run_id = run_record["id"]
-            logger.info(f"Processing {client.name} (run: {run_id})")
+            logger.info(f"Processing {client.name} ({client.merchant_id})")
 
-            # TODO: Step 1 - Collect (get_merchant_product_health, get_merchant_account_issues)
-            # TODO: Step 2 - Normalize (map to contract schema)
-            # TODO: Step 3 - Snapshot compare (src.snapshot.compare_snapshots)
-            # TODO: Step 4 - If significant change -> LLM synthesis
-            # TODO: Step 5 - Save dashboard module, recommendations, report
-            # TODO: Step 6 - Send email if needed
+            # Step 1: Collect product health
+            health = collect_product_health(client.merchant_id)
+            if health.error:
+                raise Exception(f"Product health collection failed: {health.error}")
+
+            # Set client_id on all records
+            for p in health.products:
+                p["client_id"] = client.client_id
+
+            # Step 2: Collect account issues
+            issues = collect_account_issues(client.merchant_id)
+            for iss in issues.issues:
+                iss["client_id"] = client.client_id
+
+            # Step 3: Collect performance (graceful - may not be available)
+            perf = collect_performance(client.merchant_id)
+
+            # Step 4: Snapshot compare
+            previous = get_previous_snapshot(client.client_id, client.merchant_id)
+            diff = compare_snapshots(health.products, previous)
+            logger.info(f"Snapshot diff: {diff.summary} (significant: {diff.has_significant_change})")
+
+            # Step 5: Save to Supabase
+            save_product_status(health.products)
+            save_account_issues(issues.issues)
+
+            today = date.today().isoformat()
+            save_merchant_metrics({
+                "client_id": client.client_id,
+                "merchant_id": client.merchant_id,
+                "metric_date": today,
+                "total_products": health.total,
+                "approved": health.approved,
+                "disapproved": health.disapproved,
+                "pending": health.pending,
+                "impressions": perf.impressions if not perf.error else None,
+                "clicks": perf.clicks if not perf.error else None,
+                "ctr": perf.ctr if not perf.error else None,
+            })
+
+            # Step 6: Build and save report
+            report_content = {
+                "total_products": health.total,
+                "approved": health.approved,
+                "disapproved": health.disapproved,
+                "pending": health.pending,
+                "issues_by_code": health.issues_by_code,
+                "account_issues": {
+                    "critical": issues.critical_count,
+                    "error": issues.error_count,
+                    "suggestion": issues.suggestion_count,
+                    "details": issues.issues,
+                },
+                "performance": {
+                    "impressions": perf.impressions,
+                    "clicks": perf.clicks,
+                    "ctr": perf.ctr,
+                    "error": perf.error,
+                },
+                "diff": {
+                    "has_significant_change": diff.has_significant_change,
+                    "summary": diff.summary,
+                    "new_disapprovals_count": len(diff.new_disapprovals),
+                    "resolved_disapprovals_count": len(diff.resolved_disapprovals),
+                    "disapproved_delta": diff.disapproved_delta,
+                },
+            }
+
+            save_merchant_report({
+                "client_id": client.client_id,
+                "merchant_id": client.merchant_id,
+                "report_date": today,
+                "report_type": "weekly",
+                "content": json.dumps(report_content),
+                "run_id": run_id,
+            })
+
+            # Step 7: Upsert dashboard module
+            module_status = _determine_status(health, issues)
+            top_issue = _determine_top_issue(health, issues)
+            sources_data = {
+                "products": {
+                    "last_successful_run": datetime.now(UTC).isoformat(),
+                    "stale_after_seconds": 1209600,
+                },
+            }
+            if not perf.error:
+                sources_data["performance"] = {
+                    "last_successful_run": datetime.now(UTC).isoformat(),
+                    "stale_after_seconds": 1209600,
+                }
+
+            upsert_dashboard_module({
+                "client_id": client.client_id,
+                "module": "merchant",
+                "status": module_status,
+                "summary": _build_summary(health, issues, diff),
+                "data_period_from": today,
+                "data_period_to": today,
+                "last_successful_run": datetime.now(UTC).isoformat(),
+                "sources": json.dumps(sources_data),
+                "confidence": _calculate_confidence(health, perf),
+                "metrics": json.dumps({
+                    "total_products": health.total,
+                    "approved": health.approved,
+                    "disapproved": health.disapproved,
+                    "pending": health.pending,
+                    "impressions": perf.impressions if not perf.error else None,
+                    "clicks": perf.clicks if not perf.error else None,
+                }),
+                "top_issue": json.dumps(top_issue) if top_issue else None,
+                "run_id": run_id,
+            })
 
             complete_run(
                 run_id=run_id,
                 status="SUCCESS",
-                input_records=0,
-                output_records=0,
+                input_records=health.total,
+                output_records=len(issues.issues),
             )
-            logger.info(f"Completed {client.name}")
+            logger.info(f"Completed {client.name}: {health.total} products, {module_status}")
 
         except Exception as e:
             logger.error(f"Failed processing {client.name}: {e}", exc_info=True)
@@ -69,6 +187,64 @@ def run_weekly():
                 )
 
     logger.info("Merchant Agent weekly run complete")
+
+
+def _determine_status(health, issues) -> str:
+    """Determine dashboard module status."""
+    if issues.critical_count > 0:
+        return "critical"
+    if health.disapproved > 0 or issues.error_count > 0:
+        return "warning"
+    return "ok"
+
+
+def _determine_top_issue(health, issues) -> dict | None:
+    """Pick the single most important issue."""
+    if issues.critical_count > 0:
+        critical = [i for i in issues.issues if i["severity"] == "critical"]
+        if critical:
+            return {"title": critical[0]["title"], "impact": "CRITICAL"}
+
+    if health.disapproved > 0 and health.issues_by_code:
+        top_code = max(health.issues_by_code.values(), key=lambda x: x["count"])
+        return {
+            "title": f"{top_code['count']} products: {top_code['description']}",
+            "impact": "HIGH" if top_code["count"] > 5 else "MEDIUM",
+        }
+
+    if issues.error_count > 0:
+        errors = [i for i in issues.issues if i["severity"] == "error"]
+        if errors:
+            return {"title": errors[0]["title"], "impact": "MEDIUM"}
+
+    return None
+
+
+def _build_summary(health, issues, diff) -> str:
+    """Build human-readable summary."""
+    parts = []
+
+    if health.disapproved > 0:
+        parts.append(f"{health.disapproved} products disapproved")
+    if issues.critical_count > 0:
+        parts.append(f"{issues.critical_count} critical account issues")
+    if diff.has_significant_change:
+        parts.append(diff.summary)
+
+    if not parts:
+        return f"{health.total} products, all approved"
+
+    return ". ".join(parts)[:200]
+
+
+def _calculate_confidence(health, perf) -> int:
+    """Calculate confidence score."""
+    confidence = 90
+    if health.total == 0:
+        confidence -= 30
+    if perf.error:
+        confidence -= 10
+    return max(10, confidence)
 
 
 if __name__ == "__main__":
