@@ -1,8 +1,7 @@
 """
 Merchant Agent - Weekly job.
 Railway cron entrypoint: python -m src.jobs.weekly
-Runs the full pipeline: collect -> normalize -> snapshot compare -> save.
-LLM synthesis deferred to next phase.
+Full pipeline: collect -> normalize -> snapshot compare -> LLM synthesis -> save.
 Process MUST exit after completion (Railway cron requirement).
 """
 
@@ -17,6 +16,8 @@ from src.collectors.product_health import collect_product_health
 from src.collectors.account_issues import collect_account_issues
 from src.collectors.performance import collect_performance
 from src.snapshot import compare_snapshots
+from src.synthesis import synthesize_recommendations
+from src.recommendations import process_recommendations
 from src.db import (
     create_run,
     complete_run,
@@ -26,6 +27,8 @@ from src.db import (
     save_merchant_report,
     upsert_dashboard_module,
     get_previous_snapshot,
+    get_ads_data,
+    get_seo_data,
 )
 
 logging.basicConfig(
@@ -133,7 +136,74 @@ def run_weekly():
                 "run_id": run_id,
             })
 
-            # Step 7: Upsert dashboard module
+            # Step 7: LLM synthesis (only if significant change)
+            llm_used = False
+            input_tokens = 0
+            output_tokens = 0
+            recs_created = 0
+
+            if diff.has_significant_change:
+                logger.info("Significant change detected - running LLM synthesis")
+
+                # Read cross-channel data
+                cross_channel = {}
+                ads_data = get_ads_data(client.client_id)
+                if ads_data:
+                    cross_channel["ads"] = ads_data
+                seo_data = get_seo_data(client.client_id)
+                if seo_data:
+                    cross_channel["seo"] = seo_data
+
+                raw_recs = synthesize_recommendations(
+                    client_name=client.name,
+                    merchant_id=client.merchant_id,
+                    health_summary={
+                        "total": health.total,
+                        "approved": health.approved,
+                        "disapproved": health.disapproved,
+                        "pending": health.pending,
+                        "issues_by_code": health.issues_by_code,
+                    },
+                    account_issues={
+                        "critical": issues.critical_count,
+                        "error": issues.error_count,
+                        "suggestion": issues.suggestion_count,
+                        "details": issues.issues,
+                    },
+                    performance={
+                        "impressions": perf.impressions,
+                        "clicks": perf.clicks,
+                        "ctr": perf.ctr,
+                        "error": perf.error,
+                    },
+                    diff={
+                        "has_significant_change": diff.has_significant_change,
+                        "summary": diff.summary,
+                        "new_disapprovals_count": len(diff.new_disapprovals),
+                        "resolved_disapprovals_count": len(diff.resolved_disapprovals),
+                        "disapproved_delta": diff.disapproved_delta,
+                    },
+                    cross_channel=cross_channel if cross_channel else None,
+                )
+
+                if raw_recs:
+                    # Extract token usage from first rec
+                    if raw_recs[0].get("_input_tokens"):
+                        input_tokens = raw_recs[0].pop("_input_tokens", 0)
+                        output_tokens = raw_recs[0].pop("_output_tokens", 0)
+                        llm_used = True
+
+                    created, updated, skipped = process_recommendations(
+                        client_id=client.client_id,
+                        merchant_id=client.merchant_id,
+                        raw_recommendations=raw_recs,
+                    )
+                    recs_created = created
+                    logger.info(f"Recommendations: {created} created, {updated} updated, {skipped} skipped")
+            else:
+                logger.info("No significant change - skipping LLM synthesis")
+
+            # Step 8: Upsert dashboard module
             module_status = _determine_status(health, issues)
             top_issue = _determine_top_issue(health, issues)
             sources_data = {
@@ -174,9 +244,12 @@ def run_weekly():
                 run_id=run_id,
                 status="SUCCESS",
                 input_records=health.total,
-                output_records=len(issues.issues),
+                output_records=recs_created,
+                llm_used=llm_used,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
             )
-            logger.info(f"Completed {client.name}: {health.total} products, {module_status}")
+            logger.info(f"Completed {client.name}: {health.total} products, {module_status}, {recs_created} recommendations")
 
         except Exception as e:
             logger.error(f"Failed processing {client.name}: {e}", exc_info=True)
