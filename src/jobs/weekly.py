@@ -6,10 +6,12 @@ Process MUST exit after completion (Railway cron requirement).
 """
 
 import json
+import html
 import logging
 import sys
 from datetime import UTC, date, datetime
 
+from src.email import send_report
 from src.clients import CLIENTS
 from src.config import config
 from src.collectors.product_health import collect_product_health
@@ -38,14 +40,15 @@ logging.basicConfig(
 logger = logging.getLogger("merchant-agent")
 
 
-def run_weekly():
-    """Execute weekly pipeline for all clients."""
+def run_weekly() -> list:
+    """Execute weekly pipeline for all clients. Returns the clients that failed (client, error)."""
     logger.info(f"Merchant Agent weekly run starting - {len(CLIENTS)} clients")
 
     if not CLIENTS:
         logger.warning("No clients configured. Exiting.")
-        return
+        return []
 
+    failures = []
     for client in CLIENTS:
         run_record = None
         try:
@@ -253,6 +256,7 @@ def run_weekly():
 
         except Exception as e:
             logger.error(f"Failed processing {client.name}: {e}", exc_info=True)
+            failures.append((client, e))
             if run_record:
                 complete_run(
                     run_id=run_record["id"],
@@ -260,8 +264,33 @@ def run_weekly():
                     error_code=type(e).__name__,
                     error_message=str(e)[:2000],
                 )
+            _notify_failure(client, e)
 
-    logger.info("Merchant Agent weekly run complete")
+    logger.info(f"Merchant Agent weekly run complete ({len(failures)} failed of {len(CLIENTS)})")
+    return failures
+
+
+def _notify_failure(client, error: Exception) -> None:
+    """Failures used to be recorded only in agent_runs while the process exited 0, so a
+    revoked OAuth token went unnoticed for weeks. Tell the operator right away."""
+    hint = ""
+    if type(error).__name__ == "RefreshError" or "invalid_grant" in str(error):
+        hint = (
+            "<p>Token Google OAuth wygasl lub zostal cofniety (invalid_grant). Jesli ekran zgody OAuth "
+            "w Google Cloud ma status <b>Testing</b>, tokeny odswiezania wygasaja po 7 dniach - opublikuj "
+            "aplikacje (Production), wygeneruj nowy refresh token dla zakresu "
+            "<code>https://www.googleapis.com/auth/content</code> i zaktualizuj zmienna "
+            "<code>GOOGLE_REFRESH_TOKEN</code> w Railway.</p>"
+        )
+    send_report(
+        to=client.email,
+        subject=f"[Autonoma] Merchant Agent: przebieg nieudany - {client.name}",
+        html_body=(
+            f"<p>Tygodniowy przebieg Merchant Agenta dla <b>{html.escape(client.name)}</b> "
+            f"({html.escape(client.merchant_id)}) zakonczyl sie bledem i nie zebral danych.</p>"
+            f"<p><b>{html.escape(type(error).__name__)}</b>: {html.escape(str(error)[:500])}</p>{hint}"
+        ),
+    )
 
 
 def _determine_status(health, issues) -> str:
@@ -323,5 +352,5 @@ def _calculate_confidence(health, perf) -> int:
 
 
 if __name__ == "__main__":
-    run_weekly()
-    sys.exit(0)
+    # Non-zero exit when any client failed, so Railway shows the run as failed instead of green.
+    sys.exit(1 if run_weekly() else 0)
