@@ -9,6 +9,9 @@ Uruchom LOKALNIE w swoim terminalu (token wypisze sie tylko tam, nie wklejaj go 
 
 Wartosci GOOGLE_CLIENT_ID i GOOGLE_CLIENT_SECRET sa w Railway (usluga merchant-agent -> Variables).
 
+Opcja --output PLIK zapisuje token do pliku (prawa 600) zamiast wypisywac go na ekran - przydatne, gdy skrypt
+uruchamia ktos inny w Twoim imieniu i token nie ma trafic do logow ani do czatu. Usun plik po wklejeniu do Railway.
+
 Wazne - kolejnosc:
 1. NAJPIERW w Google Cloud Console (APIs & Services -> OAuth consent screen) zmien status z "Testing" na
    "In production". Tokeny wydane w trybie Testing wygasaja po 7 dniach, nawet jesli aplikacje opublikujesz pozniej.
@@ -19,6 +22,7 @@ Typ klienta OAuth: "Desktop app" dziala od razu. Dla "Web application" dodaj w k
 http://localhost:8080/ (skrypt uzywa stalego portu 8080).
 """
 
+import argparse
 import os
 import sys
 
@@ -31,6 +35,10 @@ AUTHINFO_URL = "https://shoppingcontent.googleapis.com/content/v2.1/accounts/aut
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--output", help="zapisz token do tego pliku (0600) zamiast wypisywac")
+    args = ap.parse_args()
+
     client_id = os.environ.get("GOOGLE_CLIENT_ID")
     client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
     if not client_id or not client_secret:
@@ -66,8 +74,16 @@ def main() -> int:
     else:
         print(f"authinfo: HTTP {r.status_code} {r.text[:200]}")
 
-    print("\n== GOOGLE_REFRESH_TOKEN (wklej do Railway, nie do czatu) ==")
-    print(creds.refresh_token)
+    print(f"Klient OAuth uzyty do wydania tokenu: {client_id.split('-')[0]}-{client_id.split('-')[1][:6]}... "
+          "(musi byc ten sam, co GOOGLE_CLIENT_ID w Railway)")
+    if args.output:
+        fd = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(creds.refresh_token + "\n")
+        print(f"\nToken zapisany do {args.output} (prawa 600). Wklej go do Railway jako GOOGLE_REFRESH_TOKEN i usun plik.")
+    else:
+        print("\n== GOOGLE_REFRESH_TOKEN (wklej do Railway, nie do czatu) ==")
+        print(creds.refresh_token)
     return 0
 
 
