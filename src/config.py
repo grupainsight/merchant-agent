@@ -16,10 +16,10 @@ class Config:
     supabase_url: str = field(default_factory=lambda: os.environ["SUPABASE_URL"])
     supabase_key: str = field(default_factory=lambda: os.environ["SUPABASE_SERVICE_KEY"])
 
-    # Google OAuth
-    google_client_id: str = field(default_factory=lambda: os.environ["GOOGLE_CLIENT_ID"])
-    google_client_secret: str = field(default_factory=lambda: os.environ["GOOGLE_CLIENT_SECRET"])
-    google_refresh_token: str = field(default_factory=lambda: os.environ["GOOGLE_REFRESH_TOKEN"])
+    # Google OAuth (strip: a pasted token with a trailing newline/space makes Google answer invalid_grant)
+    google_client_id: str = field(default_factory=lambda: os.environ["GOOGLE_CLIENT_ID"].strip())
+    google_client_secret: str = field(default_factory=lambda: os.environ["GOOGLE_CLIENT_SECRET"].strip())
+    google_refresh_token: str = field(default_factory=lambda: os.environ["GOOGLE_REFRESH_TOKEN"].strip())
 
     # Anthropic
     anthropic_api_key: str = field(default_factory=lambda: os.environ["ANTHROPIC_API_KEY"])
