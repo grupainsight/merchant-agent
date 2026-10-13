@@ -12,11 +12,13 @@ Wartosci GOOGLE_CLIENT_ID i GOOGLE_CLIENT_SECRET sa w Railway (usluga merchant-a
 Opcja --output PLIK zapisuje token do pliku (prawa 600) zamiast wypisywac go na ekran - przydatne, gdy skrypt
 uruchamia ktos inny w Twoim imieniu i token nie ma trafic do logow ani do czatu. Usun plik po wklejeniu do Railway.
 
-Wazne - kolejnosc:
-1. NAJPIERW w Google Cloud Console (APIs & Services -> OAuth consent screen) zmien status z "Testing" na
-   "In production". Tokeny wydane w trybie Testing wygasaja po 7 dniach, nawet jesli aplikacje opublikujesz pozniej.
+Wazne:
+1. Sprawdz w Google Cloud Console (Platforma uwierzytelniania Google -> Odbiorcy), ze status to "W wersji
+   produkcyjnej". W trybie "Testing" tokeny odswiezania wygasaja po 7 dniach, a token wydany w trybie Testing
+   pozostaje taki, nawet jesli aplikacje opublikujesz pozniej - dlatego nowy token wydawaj dopiero w produkcji.
 2. Zaloguj sie kontem, ktore ma dostep do Merchant Center (np. Piccolo Tesoro, ID 107773243).
-3. Wklej wypisany token do Railway jako GOOGLE_REFRESH_TOKEN (usluga merchant-agent).
+3. Wklej token do Railway jako GOOGLE_REFRESH_TOKEN (usluga merchant-agent). GOOGLE_CLIENT_ID w Railway musi byc
+   tym samym klientem, ktorym wydano token (skrypt wypisze jego poczatek).
 
 Typ klienta OAuth: "Desktop app" dziala od razu. Dla "Web application" dodaj w kliencie redirect URI
 http://localhost:8080/ (skrypt uzywa stalego portu 8080).
