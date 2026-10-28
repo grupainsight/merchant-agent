@@ -235,3 +235,31 @@ def apply_retention(client_key: str, merchant_id: str, keep_from: date) -> None:
         (get_client().table(table).delete()
          .eq("client_key", client_key).eq("merchant_id", merchant_id)
          .lt("period_start", keep_from.isoformat()).execute())
+
+
+VIEW = "merchant_product_performance_published"
+
+
+def paid_clicks_by_offer(client_key: str, merchant_id: str, weeks: list[date]) -> tuple[dict[str, int], list[str]]:
+    """
+    ADS clicks per offer over the given weeks, published loads only (view), and the
+    weeks that were actually published. A week that is not published contributes nothing.
+    """
+    published = published_periods(client_key, merchant_id, since=min(weeks))
+    used = sorted((w.isoformat() for w in weeks if w.isoformat() in published), reverse=True)
+    clicks: dict[str, int] = {}
+    if not used:
+        return clicks, used
+    offset = 0
+    while True:
+        page = (
+            get_client().table(VIEW).select("offer_id,clicks")
+            .eq("client_key", client_key).eq("merchant_id", merchant_id).eq("marketing_method", "ADS")
+            .in_("period_start", used).gt("clicks", 0)
+            .order("offer_id").order("period_start").range(offset, offset + 999).execute().data
+        )
+        for row in page:
+            clicks[row["offer_id"]] = clicks.get(row["offer_id"], 0) + row["clicks"]
+        if len(page) < 1000:
+            return clicks, used
+        offset += len(page)

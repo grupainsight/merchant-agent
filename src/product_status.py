@@ -16,6 +16,8 @@ Counting rules:
 from collections import defaultdict
 from typing import Iterable
 
+from src.fix_paths import fix_path
+
 # FREE_LOCAL_LISTINGS needs a local inventory feed. Without one every product is
 # reported as not eligible there, which says nothing about the online offer, so
 # it does not make a product "disapproved". It still appears in by_context.
@@ -156,6 +158,7 @@ def summarize_issues(products: Iterable[dict]) -> dict[str, dict]:
         entry["description"] = " | ".join(entry["descriptions"]) or entry["description"]
         entry["disapproving_products"] = len(entry.pop("_disapproving_ids"))
         entry["count"] = entry["products"]
+        entry["fix_path"] = fix_path(code)
         result[code] = entry
     return result
 

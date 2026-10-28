@@ -213,3 +213,25 @@ def test_flag_on_failures_make_the_run_partial(pipeline, fake_db, monkeypatch):
     fake_db.rpc_results["resolve_client_key"] = None
     out = weekly.process_client(CLIENT, "run2", RUN_DATE)
     assert "CLIENT_KEY_UNRESOLVED" in out["error_code"]
+
+
+def test_report_has_ads_eligibility_with_lost_paid_visibility(pipeline, fake_db, monkeypatch):
+    monkeypatch.setattr(_config, "product_performance", True)
+    fake_db.rpc_results["resolve_client_key"] = "piccolotesoro"
+    performance_store._dry_published.clear()
+    monkeypatch.setattr(performance_job, "fetch_week", _load)
+    fake_db.seed("merchant_product_performance_published", [
+        {"client_key": "piccolotesoro", "merchant_id": "m1", "period_start": "2026-10-19", "offer_id": "0",
+         "marketing_method": "ADS", "clicks": 4}])
+    out = weekly.process_client(CLIENT, "run1", RUN_DATE)
+    block = out["report"]["ads_eligibility"]
+    assert block["lost_paid_visibility"]["weeks"] == ["2026-10-19", "2026-10-12"]
+    # product 0 is disapproved in SHOPPING_ADS (helpers.DISAPPROVED) and had paid clicks
+    assert block["lost_paid_visibility"]["top"][0]["offer_id"] == "0"
+    assert block["lost_paid_visibility"]["top"][0]["dedupe_keys"] == ["merchant:landing_page_error:m1"]
+
+
+def test_report_has_eligibility_counts_even_with_weekly_data_off(pipeline, fake_db, monkeypatch):
+    monkeypatch.setattr(_config, "product_performance", False)
+    block = weekly.process_client(CLIENT, "run1", RUN_DATE)["report"]["ads_eligibility"]
+    assert block["disapproved"] == 3 and block["lost_paid_visibility"] is None

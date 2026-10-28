@@ -74,6 +74,11 @@ class _Query:
         self.filters.append(lambda r: r.get(col) is not None and r.get(col) >= val)
         return self
 
+    def in_(self, col, values):
+        values = list(values)
+        self.filters.append(lambda r: r.get(col) in values)
+        return self
+
     def gt(self, col, val):
         self.filters.append(lambda r: r.get(col) is not None and r.get(col) > val)
         return self

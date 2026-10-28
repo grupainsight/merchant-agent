@@ -27,7 +27,8 @@ from src.snapshot import compare_snapshots
 from src.synthesis import synthesize_recommendations, unverified_numbers
 from src.recommendations import process_recommendations
 from src.performance_job import channel_summary, load_weeks, weeks_back
-from src.performance_store import apply_retention
+from src import ads_eligibility
+from src.performance_store import apply_retention, paid_clicks_by_offer
 from src.db import (
     create_run,
     complete_run,
@@ -239,6 +240,11 @@ def process_client(client, run_id: str, run_date: date) -> dict:
     else:
         logger.info("No significant change - skipping LLM synthesis")
 
+    # Step 6b: Shopping ads eligibility for the Ads agent (M3)
+    ads_eligibility, eligibility_problem = _ads_eligibility(client, health.products, run_date, weekly_report)
+    if eligibility_problem:
+        problems.append(eligibility_problem)
+
     # Step 7: Build and save report
     report_content = {
         "snapshot_date": today,
@@ -252,6 +258,7 @@ def process_client(client, run_id: str, run_date: date) -> dict:
         "account_issues": account_summary,
         "performance": performance_summary,
         **({"performance_weekly": {"summary": weekly_summary, "load": weekly_report}} if config.product_performance else {}),
+        "ads_eligibility": ads_eligibility,
         "previous_snapshot": {
             "status": previous.status,
             "date": previous.snapshot_date,
@@ -377,6 +384,22 @@ def _refresh_product_performance(client, products: list[dict], run_id: str, run_
         problems.append(("PRODUCT_PERFORMANCE_FAILED", f"retention/summary: {type(e).__name__}: {e}"[:500]))
         summary = None
     return summary, report, problems
+
+
+def _ads_eligibility(client, products: list[dict], run_date: date, weekly_report: dict | None):
+    """Eligibility from the current snapshot; lost paid visibility only when weekly data is on."""
+    paid, weeks = None, []
+    client_key = (weekly_report or {}).get("client_key")
+    problem = None
+    if config.product_performance and client_key:
+        try:
+            paid, weeks = paid_clicks_by_offer(
+                client_key, client.merchant_id, ads_eligibility.paid_weeks(last_complete_week(run_date)),
+            )
+        except Exception as e:
+            paid = None
+            problem = ("ADS_ELIGIBILITY_FAILED", f"paid clicks per offer: {type(e).__name__}: {e}"[:500])
+    return ads_eligibility.build(products, client.merchant_id, run_date.isoformat(), paid, weeks), problem
 
 
 def _notify_failure(client, error: Exception) -> None:

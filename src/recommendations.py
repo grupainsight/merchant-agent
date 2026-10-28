@@ -20,6 +20,7 @@ from typing import Optional
 from autonoma_contracts.dedupe import build_dedupe_key, check_dedupe
 from autonoma_contracts.models import Impact, RecommendationStatus, RecommendationType
 
+from src.fix_paths import fix_path
 from src.db import (
     get_active_recommendations,
     insert_recommendation,
@@ -90,6 +91,11 @@ def resolve_subject(
                 "severity": data.get("severity", ""),
                 "by_context": data.get("by_context", {}),
                 "sample_offer_ids": data.get("sample_offer_ids", []),
+                "fix_path": fix_path(code),
+                # The full product list of this issue is the snapshot itself: products of
+                # this merchant on snapshot_date whose issues contain issue_code.
+                "products_ref": {"table": "merchant_product_status", "merchant_id": merchant_id,
+                                 "snapshot_date": snapshot_date, "issue_code": code},
             }}],
         )
     if code.startswith("account:"):
