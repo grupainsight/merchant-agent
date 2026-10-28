@@ -11,7 +11,9 @@ import html
 import logging
 import os
 import sys
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+
+from autonoma_contracts.merchant_performance import last_complete_week
 
 from src import runtime
 
@@ -24,6 +26,8 @@ from src.collectors.performance import collect_performance
 from src.snapshot import compare_snapshots
 from src.synthesis import synthesize_recommendations, unverified_numbers
 from src.recommendations import process_recommendations
+from src.performance_job import channel_summary, load_weeks, weeks_back
+from src.performance_store import apply_retention
 from src.db import (
     create_run,
     complete_run,
@@ -33,8 +37,6 @@ from src.db import (
     save_merchant_report,
     upsert_dashboard_module,
     get_previous_snapshot,
-    get_ads_data,
-    get_seo_data,
 )
 
 logging.basicConfig(
@@ -129,6 +131,15 @@ def process_client(client, run_id: str, run_date: date) -> dict:
     if perf.status == "error":
         problems.append(("PERFORMANCE_FAILED", perf.error or "unknown error"))
 
+    # Step 3b: Weekly paid / free traffic per offer (off until sql/005 is applied)
+    weekly_summary = None
+    weekly_report = None
+    if config.product_performance:
+        weekly_summary, weekly_report, weekly_problems = _refresh_product_performance(
+            client, health.products, run_id, run_date,
+        )
+        problems.extend(weekly_problems)
+
     # Step 4: Snapshot compare (with the last complete snapshot before today)
     previous = get_previous_snapshot(client.client_id, client.merchant_id, before_date=today)
     if previous.status == "error":
@@ -184,14 +195,6 @@ def process_client(client, run_id: str, run_date: date) -> dict:
     if diff.has_significant_change:
         logger.info("Significant change detected - running LLM synthesis")
 
-        cross_channel = {}
-        ads_data = get_ads_data(client.client_id)
-        if ads_data:
-            cross_channel["ads"] = ads_data
-        seo_data = get_seo_data(client.client_id)
-        if seo_data:
-            cross_channel["seo"] = seo_data
-
         synthesis = synthesize_recommendations(
             client_name=client.name,
             merchant_id=client.merchant_id,
@@ -205,7 +208,7 @@ def process_client(client, run_id: str, run_date: date) -> dict:
             account_issues={**account_summary, "error": issues.error},
             performance=performance_summary,
             diff=diff_summary,
-            cross_channel=cross_channel if cross_channel else None,
+            performance_weekly=weekly_summary,
         )
         if synthesis.status == "failed":
             problems.append(("SYNTHESIS_FAILED", synthesis.error or "unknown error"))
@@ -248,6 +251,7 @@ def process_client(client, run_id: str, run_date: date) -> dict:
         "issues_by_code": health.issues_by_code,
         "account_issues": account_summary,
         "performance": performance_summary,
+        **({"performance_weekly": {"summary": weekly_summary, "load": weekly_report}} if config.product_performance else {}),
         "previous_snapshot": {
             "status": previous.status,
             "date": previous.snapshot_date,
@@ -294,6 +298,23 @@ def process_client(client, run_id: str, run_date: date) -> dict:
         sources_data["performance"] = {"last_successful_run": now, "stale_after_seconds": 1209600}
     if not issues.error:
         sources_data["account_issues"] = {"last_successful_run": now, "stale_after_seconds": 1209600}
+    if weekly_summary and weekly_summary["data_status"] != "missing":
+        sources_data["product_performance"] = {
+            "last_successful_run": weekly_summary["fetched_at"], "stale_after_seconds": 1209600,
+        }
+
+    metrics = {
+        "total_products": health.total,
+        "approved": health.approved,
+        "disapproved": health.disapproved,
+        "pending": health.pending,
+    }
+    if config.product_performance:
+        # ADS and ORGANIC separately; the combined 7-day total stays only in merchant_metrics.
+        metrics["performance_weekly"] = weekly_summary
+    else:
+        metrics["impressions"] = perf.impressions if perf_ok else None
+        metrics["clicks"] = perf.clicks if perf_ok else None
 
     upsert_dashboard_module({
         "client_id": client.client_id,
@@ -305,14 +326,7 @@ def process_client(client, run_id: str, run_date: date) -> dict:
         "last_successful_run": now,
         "sources": json.dumps(sources_data),
         "confidence": _calculate_confidence(health, perf, issues, diff),
-        "metrics": json.dumps({
-            "total_products": health.total,
-            "approved": health.approved,
-            "disapproved": health.disapproved,
-            "pending": health.pending,
-            "impressions": perf.impressions if perf_ok else None,
-            "clicks": perf.clicks if perf_ok else None,
-        }),
+        "metrics": json.dumps(metrics),
         "top_issue": json.dumps(t) if (t := _determine_top_issue(health, issues)) else None,
         "run_id": run_id,
     })
@@ -329,6 +343,40 @@ def process_client(client, run_id: str, run_date: date) -> dict:
         "output_tokens": synthesis.output_tokens if synthesis else 0,
         "report": report_content,
     }
+
+
+def _refresh_product_performance(client, products: list[dict], run_id: str, run_date: date):
+    """
+    Load the last complete week and the revision window, apply retention, summarize.
+    History is loaded by the separate backfill command, never here.
+    Returns (summary or None, load report, problems).
+    """
+    problems = []
+    current_urls = {p["offer_id"]: p.get("product_url") for p in products if p.get("offer_id")}
+    outcome = load_weeks(
+        client.merchant_id, weeks_back(run_date, config.perf_revision_weeks),
+        current_urls, run_date.isoformat(), run_id,
+    )
+    report = {
+        "client_key": outcome.client_key,
+        "published": outcome.published,
+        "lost_race": outcome.lost_race,
+        "errors": [{"week": w, "error": m} for w, m in outcome.errors],
+        "api_calls": outcome.api_calls,
+    }
+    if not outcome.client_key:
+        problems.append(("CLIENT_KEY_UNRESOLVED", outcome.errors[0][1]))
+        return None, report, problems
+    for week, message in outcome.errors:
+        problems.append(("PRODUCT_PERFORMANCE_FAILED", f"{week}: {message}"))
+    try:
+        keep_from = last_complete_week(run_date) - timedelta(weeks=config.perf_retention_weeks - 1)
+        apply_retention(outcome.client_key, client.merchant_id, keep_from)
+        summary = channel_summary(outcome.client_key, client.merchant_id, run_date)
+    except Exception as e:
+        problems.append(("PRODUCT_PERFORMANCE_FAILED", f"retention/summary: {type(e).__name__}: {e}"[:500]))
+        summary = None
+    return summary, report, problems
 
 
 def _notify_failure(client, error: Exception) -> None:

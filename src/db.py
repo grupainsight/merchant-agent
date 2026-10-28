@@ -228,7 +228,7 @@ def save_merchant_report(report: dict) -> None:
 # Previous snapshot
 # ============================================================
 
-SNAPSHOT_COLUMNS = "id,product_id,offer_id,status_per_reporting_context,issues,snapshot_date,created_at"
+SNAPSHOT_COLUMNS = "id,product_id,offer_id,product_url,status_per_reporting_context,issues,snapshot_date,created_at"
 
 
 def _fetch_all(build_query) -> list[dict]:
@@ -320,35 +320,3 @@ def get_previous_snapshot(client_id: str, merchant_id: str, before_date: str) ->
     except Exception as e:
         logger.error(f"Failed to read previous snapshot: {e}")
         return PreviousSnapshot(status="error", error=str(e)[:500])
-
-
-# ============================================================
-# Cross-agent reads
-# ============================================================
-
-def get_ads_data(client_id: str) -> Optional[dict]:
-    """Read latest Ads Agent data from shared memory."""
-    db = get_client()
-    result = (
-        db.table("agent_dashboard_modules")
-        .select("*")
-        .eq("client_id", client_id)
-        .eq("module", "ads")
-        .limit(1)
-        .execute()
-    )
-    return result.data[0] if result.data else None
-
-
-def get_seo_data(client_id: str) -> Optional[dict]:
-    """Read latest SEO Agent data from shared memory."""
-    db = get_client()
-    result = (
-        db.table("agent_dashboard_modules")
-        .select("*")
-        .eq("client_id", client_id)
-        .eq("module", "seo")
-        .limit(1)
-        .execute()
-    )
-    return result.data[0] if result.data else None

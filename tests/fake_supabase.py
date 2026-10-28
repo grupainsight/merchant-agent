@@ -11,10 +11,24 @@ from types import SimpleNamespace
 
 
 class FakeSupabase:
+    # Unique constraints of sql/005, enforced like Postgres (error code 23505).
+    UNIQUE = {
+        "merchant_performance_periods": ("client_key", "merchant_id", "period_start"),
+        "merchant_product_performance": ("fetch_id", "offer_id", "marketing_method"),
+    }
+
     def __init__(self, max_rows: int = 1000):
         self.tables: dict[str, list[dict]] = {}
         self.max_rows = max_rows
         self.writes: list[tuple[str, str]] = []
+        self.rpc_results: dict[str, object] = {}
+        self.fail_inserts: dict[str, int] = {}   # table -> fail on the n-th insert call (1-based)
+        self._insert_calls: dict[str, int] = {}
+
+    def rpc(self, name: str, params: dict):
+        result = self.rpc_results.get(name)
+        value = result(params) if callable(result) else result
+        return SimpleNamespace(execute=lambda: SimpleNamespace(data=value, count=None))
 
     def table(self, name: str) -> "_Query":
         return _Query(self, name)
@@ -52,6 +66,14 @@ class _Query:
         self.filters.append(lambda r: r.get(col) == val)
         return self
 
+    def neq(self, col, val):
+        self.filters.append(lambda r: r.get(col) != val)
+        return self
+
+    def gte(self, col, val):
+        self.filters.append(lambda r: r.get(col) is not None and r.get(col) >= val)
+        return self
+
     def gt(self, col, val):
         self.filters.append(lambda r: r.get(col) is not None and r.get(col) > val)
         return self
@@ -78,6 +100,10 @@ class _Query:
         self.op, self.payload = "insert", rows
         return self
 
+    def delete(self):
+        self.op = "delete"
+        return self
+
     def update(self, values):
         self.op, self.payload = "update", values
         return self
@@ -90,18 +116,27 @@ class _Query:
         rows = self.fake.rows(self.name)
         if self.op == "insert":
             self.fake.writes.append((self.name, "insert"))
+            n = self.fake._insert_calls[self.name] = self.fake._insert_calls.get(self.name, 0) + 1
+            if self.fake.fail_inserts.get(self.name) == n:
+                raise RuntimeError(f"simulated write failure on {self.name}")
             items = self.payload if isinstance(self.payload, list) else [self.payload]
+            keys = self.fake.UNIQUE.get(self.name)
             out = []
             for item in items:
                 item = dict(item)
                 item.setdefault("id", str(uuid.uuid4()))
                 item.setdefault("created_at", datetime.now(UTC).isoformat())
-                if any(r["id"] == item["id"] for r in rows):
-                    raise RuntimeError(f"duplicate key {item['id']} in {self.name}")
+                if any(r["id"] == item["id"] for r in rows) or (
+                        keys and any(all(r.get(k) == item.get(k) for k in keys) for r in rows)):
+                    raise RuntimeError(f"23505 duplicate key value violates unique constraint on {self.name}")
                 rows.append(item)
                 out.append(item)
             return SimpleNamespace(data=out, count=None)
         matched = [r for r in rows if all(f(r) for f in self.filters)]
+        if self.op == "delete":
+            self.fake.writes.append((self.name, "delete"))
+            self.fake.tables[self.name] = [r for r in rows if r not in matched]
+            return SimpleNamespace(data=matched, count=None)
         if self.op == "update":
             self.fake.writes.append((self.name, "update"))
             for r in matched:

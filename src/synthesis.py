@@ -15,6 +15,7 @@ import anthropic
 
 from src import runtime
 from src.config import config
+from src.performance_summary import prompt_lines
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +27,12 @@ You receive:
 - Account-level issues
 - Performance data (if available)
 - Snapshot diff (what changed since last week)
-- Cross-channel data from other agents (Ads, SEO) if available
 
 Your job:
 1. Identify the most impactful problems
 2. Explain WHY each problem matters (which destinations and how many products lose visibility)
-3. Recommend specific, actionable fixes
-4. When cross-channel data is available, highlight correlations
+3. Recommend specific, actionable fixes to the feed and catalog
+You do not assess Google Ads campaigns or SEO; other agents own those decisions.
 
 Output format - respond with a JSON array of recommendations:
 [
@@ -104,7 +104,7 @@ def synthesize_recommendations(
     account_issues: dict,
     performance: dict,
     diff: dict,
-    cross_channel: Optional[dict] = None,
+    performance_weekly: Optional[dict] = None,
 ) -> SynthesisResult:
     """
     Call Claude to generate recommendations from collected data.
@@ -118,7 +118,7 @@ def synthesize_recommendations(
 
     user_message = _build_user_message(
         client_name, merchant_id, health_summary,
-        account_issues, performance, diff, cross_channel,
+        account_issues, performance, diff, performance_weekly,
     )
 
     result = SynthesisResult(status="failed", source_text=user_message)
@@ -173,7 +173,7 @@ def _build_user_message(
     account_issues: dict,
     performance: dict,
     diff: dict,
-    cross_channel: Optional[dict],
+    performance_weekly: Optional[dict] = None,
 ) -> str:
     """Build the user message with all collected data."""
     parts = [
@@ -220,17 +220,22 @@ def _build_user_message(
                 f"{issue.get('title', '?')}: {issue.get('detail', '')}"
             )
 
-    # Performance
-    parts.append("")
-    parts.append(f"## Performance ({performance.get('date_from', '?')} to {performance.get('date_to', '?')})")
-    if performance.get("status") == "error":
-        parts.append(f"- UNAVAILABLE (collection failed, not a lack of data): {performance.get('error')}")
-    elif performance.get("status") == "no_data":
-        parts.append("- The API answered but returned no rows for this period")
+    # Performance: per channel when the weekly data is on, otherwise the 7-day total
+    weekly_lines = prompt_lines(performance_weekly)
+    if weekly_lines:
+        parts.append("")
+        parts.extend(weekly_lines)
     else:
-        parts.append(f"- Impressions: {performance.get('impressions', 0)}")
-        parts.append(f"- Clicks: {performance.get('clicks', 0)}")
-        parts.append(f"- CTR: {performance.get('ctr', 0):.2%}")
+        parts.append("")
+        parts.append(f"## Performance ({performance.get('date_from', '?')} to {performance.get('date_to', '?')})")
+        if performance.get("status") == "error":
+            parts.append(f"- UNAVAILABLE (collection failed, not a lack of data): {performance.get('error')}")
+        elif performance.get("status") == "no_data":
+            parts.append("- The API answered but returned no rows for this period")
+        else:
+            parts.append(f"- Impressions: {performance.get('impressions', 0)}")
+            parts.append(f"- Clicks: {performance.get('clicks', 0)}")
+            parts.append(f"- CTR: {performance.get('ctr', 0):.2%}")
 
     # Diff
     parts.append("")
@@ -252,21 +257,6 @@ def _build_user_message(
                 f"- {change['code']}: {change['before']} -> {change['after']} products "
                 f"({change['after'] - change['before']:+d})"
             )
-
-    # Cross-channel
-    if cross_channel:
-        parts.append("")
-        parts.append("## Cross-Channel Data")
-        if cross_channel.get("ads"):
-            ads = cross_channel["ads"]
-            parts.append(f"### Ads Agent (last report)")
-            parts.append(f"- Status: {ads.get('status', 'unknown')}")
-            parts.append(f"- Summary: {ads.get('summary', 'no data')}")
-        if cross_channel.get("seo"):
-            seo = cross_channel["seo"]
-            parts.append(f"### SEO Agent (last report)")
-            parts.append(f"- Status: {seo.get('status', 'unknown')}")
-            parts.append(f"- Summary: {seo.get('summary', 'no data')}")
 
     return "\n".join(parts)
 

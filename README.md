@@ -37,6 +37,21 @@ python -m src.jobs.weekly --dry-run DIR [--no-llm]
 
 Same via env: `MERCHANT_DRY_RUN_DIR=DIR`, `MERCHANT_LLM=off`.
 
+## Weekly product performance (paid / free per offer)
+
+Off until `sql/005_merchant_product_performance.sql` (autonoma-contracts) is applied:
+`MERCHANT_PRODUCT_PERFORMANCE=on`. The weekly job loads the last complete Monday-Sunday
+week plus a revision window (`MERCHANT_PERF_REVISION_WEEKS`, default 2) and applies
+retention (`MERCHANT_PERF_RETENTION_WEEKS`, default 60). History is a separate command:
+
+```
+python -m src.jobs.backfill_performance [--weeks 56] [--reload] [--dry-run DIR]
+```
+
+Reading rules (missing row is not zero, channels never added up, URLs are current not
+historical): `docs/merchant-product-performance.md` in autonoma-contracts.
+`merchant_metrics` keeps its 7-day rolling total.
+
 ## Tests
 
 ```

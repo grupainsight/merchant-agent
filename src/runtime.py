@@ -62,6 +62,8 @@ def _json_default(value: Any) -> Any:
 # ============================================================
 
 _WRITE_METHODS = frozenset({"insert", "upsert", "update", "delete"})
+# Database functions known to only read (sql/004 in autonoma-contracts).
+READ_ONLY_RPCS = frozenset({"resolve_client_key"})
 
 
 class ReadOnlyClient:
@@ -73,8 +75,13 @@ class ReadOnlyClient:
     def table(self, name: str) -> "_ReadOnlyTable":
         return _ReadOnlyTable(self._client.table(name), name)
 
+    def rpc(self, name: str, params: dict) -> Any:
+        if name not in READ_ONLY_RPCS:
+            raise DryRunWriteError(f"rpc {name} is not allowed in a dry run")
+        return self._client.rpc(name, params)
+
     def __getattr__(self, attr: str) -> Any:
-        if attr in ("rpc", "storage", "functions"):
+        if attr in ("storage", "functions"):
             raise DryRunWriteError(f"{attr} is not allowed in a dry run")
         return getattr(self._client, attr)
 

@@ -133,7 +133,7 @@ def test_read_only_client_blocks_writes(fake_db):
         with pytest.raises(runtime.DryRunWriteError):
             getattr(guarded.table("agent_runs"), op)
     with pytest.raises(runtime.DryRunWriteError):
-        guarded.rpc
+        guarded.rpc("any_function", {})
     assert guarded.table("agent_runs").select("*").execute().data == []
 
 
@@ -154,3 +154,62 @@ def test_numbers_not_in_data_are_reported(pipeline, fake_db):
     assert out["status"] == "SUCCESS"
     assert out["report"]["recommendations"]["numbers_not_in_data"] == [
         {"issue_code": "landing_page_error", "title": "3 produkty", "numbers": [800]}]
+
+
+# ---------------------------------------------------------------- weekly product performance (M1/M2)
+
+from datetime import timedelta as _td
+
+from src import performance_job, performance_store
+from src.collectors.product_performance import WeekFetchError, WeekLoad
+from src.config import config as _config
+
+
+def _load(mid, start):
+    load = WeekLoad(period_start=start, period_end=start + _td(days=6))
+    load.offers = {("0", "ADS"): [5, 1]}
+    load.totals = {"ADS": [8, 1], "ORGANIC": [9, 0]}
+    return load
+
+
+def test_flag_off_keeps_the_dashboard_and_makes_no_performance_calls(pipeline, fake_db, monkeypatch):
+    monkeypatch.setattr(_config, "product_performance", False)
+    monkeypatch.setattr(performance_job, "fetch_week", lambda *a: pytest.fail("must not fetch"))
+    out = weekly.process_client(CLIENT, "run1", RUN_DATE)
+    metrics = json.loads(fake_db.rows("agent_dashboard_modules")[0]["metrics"])
+    assert set(metrics) == {"total_products", "approved", "disapproved", "pending", "impressions", "clicks"}
+    assert "performance_weekly" not in out["report"]
+    assert fake_db.rows("merchant_performance_periods") == []
+
+
+def test_flag_on_shows_channels_separately(pipeline, fake_db, monkeypatch):
+    monkeypatch.setattr(_config, "product_performance", True)
+    fake_db.rpc_results["resolve_client_key"] = "piccolotesoro"
+    performance_store._dry_published.clear()
+    monkeypatch.setattr(performance_job, "fetch_week", _load)
+    out = weekly.process_client(CLIENT, "run1", RUN_DATE)
+    assert out["status"] == "SUCCESS"
+    metrics = json.loads(fake_db.rows("agent_dashboard_modules")[0]["metrics"])
+    assert "impressions" not in metrics and "clicks" not in metrics
+    weekly_metrics = metrics["performance_weekly"]
+    assert weekly_metrics["period"] == {"start": "2026-10-19", "end": "2026-10-25"}
+    assert (weekly_metrics["ADS"]["impressions"], weekly_metrics["ORGANIC"]["impressions"]) == (8, 9)
+    assert weekly_metrics["data_status"] == "partial"           # 2 weeks loaded, trend needs 4 more
+    assert out["report"]["performance_weekly"]["load"]["published"] == ["2026-10-19", "2026-10-12"]
+    # merchant_metrics keeps its 7-day rolling semantics
+    assert fake_db.rows("merchant_metrics")[0]["impressions"] == 100
+    sources = json.loads(fake_db.rows("agent_dashboard_modules")[0]["sources"])
+    assert "product_performance" in sources
+
+
+def test_flag_on_failures_make_the_run_partial(pipeline, fake_db, monkeypatch):
+    monkeypatch.setattr(_config, "product_performance", True)
+    fake_db.rpc_results["resolve_client_key"] = "piccolotesoro"
+    monkeypatch.setattr(performance_job, "fetch_week", lambda mid, start: (_ for _ in ()).throw(WeekFetchError("HTTP 500")))
+    out = weekly.process_client(CLIENT, "run1", RUN_DATE)
+    assert out["status"] == "PARTIAL" and "PRODUCT_PERFORMANCE_FAILED" in out["error_code"]
+    assert json.loads(fake_db.rows("agent_dashboard_modules")[0]["metrics"])["performance_weekly"]["data_status"] == "missing"
+
+    fake_db.rpc_results["resolve_client_key"] = None
+    out = weekly.process_client(CLIENT, "run2", RUN_DATE)
+    assert "CLIENT_KEY_UNRESOLVED" in out["error_code"]
