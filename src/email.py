@@ -7,6 +7,7 @@ from typing import Optional
 
 import resend
 
+from src import runtime
 from src.config import config
 
 logger = logging.getLogger(__name__)
@@ -18,7 +19,12 @@ def send_report(
     html_body: str,
     reply_to: Optional[str] = None,
 ) -> bool:
-    """Send a report email. Returns True on success."""
+    """Send a report email. Returns True on success. In a dry run the email is written to a file."""
+    if runtime.is_dry_run():
+        runtime.record("emails", {"to": to, "subject": subject, "html": html_body})
+        logger.info(f"[dry run] Email not sent, written to file: {subject}")
+        return True
+
     resend.api_key = config.resend_api_key
 
     try:

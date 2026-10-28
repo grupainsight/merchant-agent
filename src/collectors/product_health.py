@@ -18,6 +18,7 @@ from typing import Optional
 import httpx
 
 from src.auth import get_credentials
+from src.product_status import count_statuses, status_by_context, summarize_issues
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class ProductHealthResult:
     disapproved: int = 0
     pending: int = 0
     issues_by_code: dict = field(default_factory=dict)
+    status_by_context: list = field(default_factory=list)
     error: Optional[str] = None
 
 
@@ -51,28 +53,12 @@ def collect_product_health(merchant_id: str) -> ProductHealthResult:
         result.products = [_normalize_product(p, merchant_id) for p in all_products]
         result.total = len(result.products)
 
-        for p in result.products:
-            status = _classify_product(p)
-            if status == "approved":
-                result.approved += 1
-            elif status == "disapproved":
-                result.disapproved += 1
-            else:
-                result.pending += 1
-
-            for issue in p.get("issues", []):
-                code = issue.get("code", "unknown")
-                if code not in result.issues_by_code:
-                    result.issues_by_code[code] = {
-                        "code": code,
-                        "description": issue.get("description", ""),
-                        "severity": issue.get("severity", ""),
-                        "count": 0,
-                        "product_ids": [],
-                    }
-                result.issues_by_code[code]["count"] += 1
-                if len(result.issues_by_code[code]["product_ids"]) < 10:
-                    result.issues_by_code[code]["product_ids"].append(p["product_id"])
+        counts = count_statuses(result.products)
+        result.approved = counts["approved"]
+        result.disapproved = counts["disapproved"]
+        result.pending = counts["pending"]
+        result.issues_by_code = summarize_issues(result.products)
+        result.status_by_context = status_by_context(result.products)
 
         logger.info(
             f"Merchant {merchant_id}: {result.total} products "
@@ -196,28 +182,3 @@ def _normalize_product(raw: dict, merchant_id: str) -> dict:
         "availability": attrs.get("availability", ""),
         "snapshot_date": today,
     }
-
-
-def _classify_product(product: dict) -> str:
-    """
-    Classify product as approved/disapproved/pending.
-    Disapproved if ANY reporting context (except FREE_LOCAL_LISTINGS) is disapproved.
-    """
-    dominated_contexts = {"FREE_LOCAL_LISTINGS"}
-
-    has_approval = False
-    has_disapproval = False
-
-    for ctx in product.get("status_per_reporting_context", []):
-        if ctx["reporting_context"] in dominated_contexts:
-            continue
-        if ctx["status"] == "NOT_ELIGIBLE_OR_DISAPPROVED":
-            has_disapproval = True
-        elif ctx["status"] == "APPROVED":
-            has_approval = True
-
-    if has_disapproval:
-        return "disapproved"
-    elif has_approval:
-        return "approved"
-    return "pending"
