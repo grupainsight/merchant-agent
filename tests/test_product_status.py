@@ -73,3 +73,14 @@ def test_issue_only_in_free_local_listings_disapproves_nothing():
     summary = summarize_issues([p])["local_stores_lack_inventory"]
     assert summary["products"] == 1
     assert summary["disapproving_products"] == 0
+
+
+def test_code_covering_several_attributes_keeps_the_split():
+    def missing(attr, desc):
+        return {**issue("item_missing_required_attribute", description=desc), "attribute": attr}
+    products = [product(1, issues=[missing("price", "Missing product price")])]
+    products += [product(i, issues=[missing("title", "Missing title")]) for i in range(2, 5)]
+    summary = summarize_issues(products)["item_missing_required_attribute"]
+    assert summary["attributes"] == {"title": 3, "price": 1}
+    assert summary["descriptions"] == {"Missing title": 3, "Missing product price": 1}
+    assert summary["description"] == "Missing title | Missing product price"

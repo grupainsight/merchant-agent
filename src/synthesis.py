@@ -64,6 +64,8 @@ Rules:
 - "products" in the data are unique products; "occurrences" counts the same product once per
   destination and country - never present occurrences as a number of products
 - If a data source is marked unavailable, say so; do not infer that it has no data
+- One issue code can cover several attributes or descriptions; describe the split as given,
+  do not attribute all products to the first one
 - When products are disapproved, calculate approximate revenue impact if possible
 - Respond ONLY with the JSON array, no other text
 - Language: Polish (this is for Polish e-commerce clients)
@@ -189,11 +191,13 @@ def _build_user_message(
                 f"{ctx}: " + ", ".join(f"{country} {n}" for country, n in countries.items())
                 for ctx, countries in data.get("by_context", {}).items()
             )
+            attributes = ", ".join(f"{a} {n}" for a, n in data.get("attributes", {}).items() if a != "-")
             parts.append(
                 f"- {code}: {data['products']} products, {data['occurrences']} occurrences, "
                 f"{data.get('disapproving_products', 0)} products disapproved by it "
                 f"({data.get('description', '')}, severity: {data.get('severity') or 'unknown'}) "
                 f"[by destination and country: {contexts}]"
+                + (f" [products by attribute: {attributes}]" if attributes else "")
             )
 
     # Account issues

@@ -96,6 +96,8 @@ def summarize_issues(products: Iterable[dict]) -> dict[str, dict]:
       disapproving_products - products where the code has severity DISAPPROVED in a
                               destination that counts for classify()
       by_context            - {reporting_context: {country: products}}
+      attributes            - {attribute: products}, e.g. {"title": 70, "price": 2}
+      descriptions          - {description: products}; "description" joins them
       severity              - most severe severity seen for the code
       sample_product_ids / sample_offer_ids - up to SAMPLE_SIZE examples
     """
@@ -116,12 +118,17 @@ def summarize_issues(products: Iterable[dict]) -> dict[str, dict]:
                     "disapproving_products": 0,
                     "_disapproving_ids": set(),
                     "_ctx": defaultdict(set),
+                    "_attr": defaultdict(set),
+                    "_desc": {},
                     "sample_product_ids": [],
                     "sample_offer_ids": [],
                 }
             entry["occurrences"] += 1
-            if not entry["description"] and issue.get("description"):
-                entry["description"] = issue["description"]
+            # One code can cover several attributes (item_missing_required_attribute:
+            # title, price...), so descriptions and attributes are kept per value.
+            if issue.get("description"):
+                entry["_desc"].setdefault(issue["description"], set()).add(pid)
+            entry["_attr"][issue.get("attribute") or "-"].add(pid)
             severity = issue.get("severity", "")
             if _SEVERITY_RANK.get(severity, 0) > _SEVERITY_RANK.get(entry["severity"], 0):
                 entry["severity"] = severity
@@ -144,10 +151,18 @@ def summarize_issues(products: Iterable[dict]) -> dict[str, dict]:
         for (ctx, country), ids in sorted(entry.pop("_ctx").items()):
             by_context[ctx][country] = len(ids)
         entry["by_context"] = dict(by_context)
+        entry["attributes"] = _by_products(entry.pop("_attr"))
+        entry["descriptions"] = _by_products(entry.pop("_desc"))
+        entry["description"] = " | ".join(entry["descriptions"]) or entry["description"]
         entry["disapproving_products"] = len(entry.pop("_disapproving_ids"))
         entry["count"] = entry["products"]
         result[code] = entry
     return result
+
+
+def _by_products(groups: dict) -> dict[str, int]:
+    """{value: product ids} -> {value: products}, largest first."""
+    return dict(sorted(((k, len(v)) for k, v in groups.items()), key=lambda kv: -kv[1]))
 
 
 def issue_product_counts(products: Iterable[dict]) -> dict[str, int]:

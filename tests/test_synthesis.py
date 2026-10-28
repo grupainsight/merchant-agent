@@ -57,7 +57,7 @@ def test_disabled():
 def test_prompt_marks_unavailable_sources_and_counts():
     msg = synthesis._build_user_message(
         "X", "m1",
-        {"total": 3, "issues_by_code": {"lpe": {"products": 2, "occurrences": 5, "by_context": {"SHOPPING_ADS": {"PL": 2}}}}},
+        {"total": 3, "issues_by_code": {"lpe": {"products": 2, "occurrences": 5, "by_context": {"SHOPPING_ADS": {"PL": 2}}, "attributes": {"title": 2, "price": 1}}}},
         {"error": "HTTP 500"},
         {"status": "error", "error": "HTTP 400: bad query"},
         {"comparable": False, "summary": "No complete previous snapshot"},
@@ -65,6 +65,7 @@ def test_prompt_marks_unavailable_sources_and_counts():
     )
     assert "lpe: 2 products, 5 occurrences" in msg
     assert "SHOPPING_ADS: PL 2" in msg
+    assert "[products by attribute: title 2, price 1]" in msg
     assert "UNAVAILABLE (collection failed, not a lack of data): HTTP 400" in msg
     assert "Account Issues\n- UNAVAILABLE" in msg
     assert "NOT AVAILABLE: No complete previous snapshot" in msg
