@@ -144,3 +144,13 @@ def test_top_issue_ranks_by_products_actually_disapproved():
     health = ProductHealthResult(products=products, disapproved=6, issues_by_code=summarize_issues(products))
     top = weekly._determine_top_issue(health, AccountIssuesResult())
     assert top["title"].startswith("6 products disapproved: landing_page_error")
+
+
+def test_numbers_not_in_data_are_reported(pipeline, fake_db):
+    pipeline["synthesis"] = SynthesisResult(status="ok", source_text="landing_page_error: 3 products", recommendations=[{
+        "type": "RECOMMENDATION", "title": "3 produkty", "summary": "min. 800x800 px", "impact": "HIGH",
+        "issue_code": "landing_page_error"}])
+    out = weekly.process_client(CLIENT, "run1", RUN_DATE)
+    assert out["status"] == "SUCCESS"
+    assert out["report"]["recommendations"]["numbers_not_in_data"] == [
+        {"issue_code": "landing_page_error", "title": "3 produkty", "numbers": [800]}]

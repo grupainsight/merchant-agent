@@ -70,3 +70,17 @@ def test_prompt_marks_unavailable_sources_and_counts():
     assert "Account Issues\n- UNAVAILABLE" in msg
     assert "NOT AVAILABLE: No complete previous snapshot" in msg
     assert "dedupe_key_suffix" not in synthesis.SYSTEM_PROMPT
+
+
+def test_unverified_numbers_flags_invented_thresholds():
+    source = "- landing_page_error: 5993 products\n- landing_page_error: 5963 -> 5993 products (+30)\n- CTR: 0.68%"
+    rec = {"title": "5 993 produkty odrzucone", "summary": "Przybyło 30, to 96% odrzuceń, CTR 0,68%",
+           "recommended_action": "1. Zdjęcia min. 800×800 px. 2. Sprawdź 1000 stron"}
+    assert synthesis.unverified_numbers(rec, source) == [800, 1000]
+    assert synthesis.unverified_numbers({"title": "5 993 produkty", "summary": "+30"}, source) == []
+
+
+def test_prompt_forbids_revenue_estimates_and_unsourced_requirements():
+    assert "revenue impact" not in synthesis.SYSTEM_PROMPT
+    assert "Do not estimate revenue" in synthesis.SYSTEM_PROMPT
+    assert "Do not state technical requirements" in synthesis.SYSTEM_PROMPT

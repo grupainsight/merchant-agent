@@ -22,7 +22,7 @@ from src.collectors.product_health import collect_product_health
 from src.collectors.account_issues import collect_account_issues
 from src.collectors.performance import collect_performance
 from src.snapshot import compare_snapshots
-from src.synthesis import synthesize_recommendations
+from src.synthesis import synthesize_recommendations, unverified_numbers
 from src.recommendations import process_recommendations
 from src.db import (
     create_run,
@@ -180,6 +180,7 @@ def process_client(client, run_id: str, run_date: date) -> dict:
     # Step 6: LLM synthesis (only if significant change)
     synthesis = None
     rec_result = None
+    number_warnings: list[dict] = []
     if diff.has_significant_change:
         logger.info("Significant change detected - running LLM synthesis")
 
@@ -209,6 +210,13 @@ def process_client(client, run_id: str, run_date: date) -> dict:
         if synthesis.status == "failed":
             problems.append(("SYNTHESIS_FAILED", synthesis.error or "unknown error"))
         elif synthesis.status == "ok":
+            # Numbers the model wrote that are not in the data it was given (e.g. an
+            # invented "800x800 px"). Reported for review; the recommendation is kept.
+            for raw in synthesis.recommendations:
+                numbers = unverified_numbers(raw, synthesis.source_text)
+                if numbers:
+                    number_warnings.append({"issue_code": raw.get("issue_code"), "title": raw.get("title"), "numbers": numbers})
+                    logger.warning(f"Numbers not found in the data in {raw.get('title')!r}: {numbers}")
             rec_result = process_recommendations(
                 client_id=client.client_id,
                 merchant_id=client.merchant_id,
@@ -266,6 +274,8 @@ def process_client(client, run_id: str, run_date: date) -> dict:
             "skipped": rec_result.skipped,
             "rejected": [{"title": t, "reason": r} for t, r in rec_result.invalid],
             "errors": [{"title": t, "error": r} for t, r in rec_result.errors],
+            "numbers_not_in_data": number_warnings,
+            "action_saved_as_recommendation": rec_result.retyped,
         } if rec_result else None,
     }
     save_merchant_report({

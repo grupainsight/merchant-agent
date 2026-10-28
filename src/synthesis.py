@@ -6,6 +6,7 @@ Called only when snapshot compare detects significant changes.
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Optional
@@ -29,14 +30,14 @@ You receive:
 
 Your job:
 1. Identify the most impactful problems
-2. Explain WHY each problem matters (lost revenue, wasted ad spend, missed visibility)
+2. Explain WHY each problem matters (which destinations and how many products lose visibility)
 3. Recommend specific, actionable fixes
 4. When cross-channel data is available, highlight correlations
 
 Output format - respond with a JSON array of recommendations:
 [
   {
-    "type": "INSIGHT" | "RECOMMENDATION" | "ACTION",
+    "type": "INSIGHT" | "RECOMMENDATION",
     "title": "Short title (max 100 chars)",
     "summary": "Detailed explanation with business impact (max 500 chars)",
     "recommended_action": "Specific steps to fix (null for INSIGHT)",
@@ -58,7 +59,7 @@ Rules:
 - Maximum 5 recommendations per run
 - INSIGHT = informational, no action needed
 - RECOMMENDATION = suggested fix, client should act
-- ACTION = specific executable change (rare, only when very clear)
+- Never use ACTION: this agent does not execute changes
 - Always set expires_at context: INSIGHTs expire in 14 days
 - Be specific: "12 products disapproved due to landing_page_error" not "some products have issues"
 - "products" in the data are unique products; "occurrences" counts the same product once per
@@ -66,7 +67,12 @@ Rules:
 - If a data source is marked unavailable, say so; do not infer that it has no data
 - One issue code can cover several attributes or descriptions; describe the split as given,
   do not attribute all products to the first one
-- When products are disapproved, calculate approximate revenue impact if possible
+- Use only facts from the data below. Every number you write must come from the data.
+- Do not estimate revenue, lost sales, ROAS or costs: the data has no sales or revenue figures.
+- Do not state technical requirements, thresholds, deadlines or tool names (pixel sizes, review
+  times, Merchant Center features) as facts. If a step depends on Google's requirements, write
+  "sprawdź aktualne wymagania w dokumentacji Google Merchant Center".
+- Do not invent examples of affected products or industries; refer to the product list instead.
 - Respond ONLY with the JSON array, no other text
 - Language: Polish (this is for Polish e-commerce clients)
 """
@@ -84,6 +90,7 @@ class SynthesisResult:
     input_tokens: int = 0
     output_tokens: int = 0
     error: Optional[str] = None
+    source_text: str = ""
 
     @property
     def llm_called(self) -> bool:
@@ -114,7 +121,7 @@ def synthesize_recommendations(
         account_issues, performance, diff, cross_channel,
     )
 
-    result = SynthesisResult(status="failed")
+    result = SynthesisResult(status="failed", source_text=user_message)
     raw_text = ""
     try:
         client = anthropic.Anthropic(api_key=config.anthropic_api_key)
@@ -241,7 +248,10 @@ def _build_user_message(
         if diff.get("resolved_issue_codes"):
             parts.append(f"- Issue codes no longer present: {', '.join(diff['resolved_issue_codes'])}")
         for change in diff.get("issue_changes", [])[:10]:
-            parts.append(f"- {change['code']}: {change['before']} -> {change['after']} products")
+            parts.append(
+                f"- {change['code']}: {change['before']} -> {change['after']} products "
+                f"({change['after'] - change['before']:+d})"
+            )
 
     # Cross-channel
     if cross_channel:
@@ -264,3 +274,29 @@ def _build_user_message(
 def _account_issue_id(issue: dict) -> str:
     """Short id of an account issue: the last segment of its resource name."""
     return (issue.get("issue_id") or "").rstrip("/").rsplit("/", 1)[-1] or "unknown"
+
+
+_THOUSANDS = re.compile(r"(?<=\d)[ \u00a0](?=\d{3}\b)")
+_NUMBER = re.compile(r"\d+(?:[.,]\d+)?\s?%?")
+
+
+def _numbers(text: str, minimum: int) -> set[int]:
+    """Whole numbers >= minimum in text; "5 993" counts as 5993, percentages and decimals are skipped."""
+    found = set()
+    for m in _NUMBER.finditer(_THOUSANDS.sub("", text or "")):
+        token = m.group().strip()
+        if token.endswith("%") or "," in token or "." in token:
+            continue
+        if int(token) >= minimum:
+            found.add(int(token))
+    return found
+
+
+def unverified_numbers(rec: dict, source_text: str, minimum: int = 20) -> list[int]:
+    """
+    Numbers (>= minimum, not percentages) in a recommendation's text that do not
+    appear in the data the model was given. A quality signal, not a rejection:
+    it catches invented thresholds such as "800x800 px".
+    """
+    text = " ".join(str(rec.get(k) or "") for k in ("title", "summary", "recommended_action"))
+    return sorted(_numbers(text, minimum) - _numbers(source_text, minimum))

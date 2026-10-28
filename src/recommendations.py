@@ -31,7 +31,18 @@ logger = logging.getLogger(__name__)
 
 AGENT = "merchant"
 TOPICS = frozenset({"performance", "catalog"})
+# ACTION means "executable change after approval" in the contract; this agent
+# executes nothing, so it only produces INSIGHT and RECOMMENDATION.
+ALLOWED_TYPES = frozenset({RecommendationType.INSIGHT.value, RecommendationType.RECOMMENDATION.value})
 INSIGHT_TTL = timedelta(days=14)
+
+# Marks recommendations built on the corrected data (stage A, 2026-10). Older
+# merchant recommendations have ids "rec_<date>_<merchant>_<n>", keys chosen by
+# the model and no such evidence entry.
+DATA_VERSION_EVIDENCE = {"source": "merchant_agent", "data": {
+    "data_version": 2,
+    "note": "deterministic issue keys, products counted once, full previous snapshot",
+}}
 
 
 @dataclass
@@ -49,6 +60,7 @@ class ProcessResult:
     skipped: int = 0
     invalid: list = field(default_factory=list)   # (title, reason)
     errors: list = field(default_factory=list)    # (title, error)
+    retyped: list = field(default_factory=list)   # titles of ACTIONs saved as RECOMMENDATION
 
 
 def new_recommendation_id() -> str:
@@ -106,6 +118,8 @@ def resolve_subject(
 def _validate(raw: dict) -> Optional[str]:
     if raw.get("type") not in RecommendationType._value2member_map_:
         return f"unknown type {raw.get('type')!r}"
+    if raw.get("type") not in ALLOWED_TYPES:
+        return f"type {raw.get('type')} not produced by this agent"
     if raw.get("impact") not in Impact._value2member_map_:
         return f"unknown impact {raw.get('impact')!r}"
     if not (raw.get("title") or "").strip():
@@ -140,6 +154,10 @@ def process_recommendations(
 
     for raw in raw_recommendations:
         title = str(raw.get("title", ""))[:200]
+        if raw.get("type") == RecommendationType.ACTION.value:
+            raw = {**raw, "type": RecommendationType.RECOMMENDATION.value}
+            result.retyped.append(title)
+            logger.warning(f"ACTION from the model saved as RECOMMENDATION: {title!r}")
         try:
             problem = _validate(raw)
             subject = None if problem else resolve_subject(raw, merchant_id, snapshot_date, issues_by_code, account_issues)
@@ -169,7 +187,7 @@ def process_recommendations(
 
             if decision.action == "update":
                 last_seen = _parse_ts(latest.get("last_seen_at"))
-                values = {"evidence": subject.evidence or latest.get("evidence", []), "last_seen_at": now.isoformat()}
+                values = {"evidence": subject.evidence + [DATA_VERSION_EVIDENCE], "last_seen_at": now.isoformat()}
                 # A rerun on the same day is not another occurrence.
                 if not last_seen or last_seen.date() != now.date():
                     values["occurrence_count"] = (latest.get("occurrence_count") or 1) + 1
@@ -232,8 +250,8 @@ def _build_recommendation(
         "impact": raw["impact"],
         "confidence": confidence,
         "reason_codes": raw.get("reason_codes") or [],
-        "evidence": subject.evidence,
-        "requires_approval": rec_type == "ACTION",
+        "evidence": subject.evidence + [DATA_VERSION_EVIDENCE],
+        "requires_approval": False,
         "dedupe_key": dedupe_key,
         "subject_key": subject.subject_key,
         "first_seen_at": now.isoformat(),

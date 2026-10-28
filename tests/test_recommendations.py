@@ -99,3 +99,18 @@ def test_existing_records_keep_their_status(fake_db):
 def test_invalid_type_or_impact_is_rejected(fake_db):
     result = run([raw("image_too_small", type="TODO"), raw("landing_page_error", impact="HUGE")])
     assert result.created == 0 and len(result.invalid) == 2
+
+
+def test_new_recommendations_are_marked_as_built_on_corrected_data(fake_db):
+    run([raw("landing_page_error")])
+    run([raw("landing_page_error")], now=NOW + timedelta(days=7))
+    evidence = recs(fake_db)[0]["evidence"]
+    assert {"source": "merchant_agent", "data": {"data_version": 2,
+            "note": "deterministic issue keys, products counted once, full previous snapshot"}} in evidence
+
+
+def test_action_from_the_model_is_saved_as_recommendation(fake_db):
+    result = run([raw("landing_page_error", type="ACTION")])
+    rec = recs(fake_db)[0]
+    assert (rec["type"], rec["requires_approval"]) == ("RECOMMENDATION", False)
+    assert result.retyped == ["T"]
